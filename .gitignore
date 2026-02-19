@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+
+# Virtual environments
+.venv-3/
+.venv/
+.env/
+
+# Local config / secrets
+.streamlit/secrets.toml
+.env
+
+# VS Code local state
+.vscode/
+
+# Storage / artifacts
+storage/
+*.sqlite3
