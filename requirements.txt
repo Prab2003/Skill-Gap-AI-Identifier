@@ -8,5 +8,4 @@ huggingface-hub
 requests
 tenacity
 PyYAML
-xhtml2pdf
 kaleido
