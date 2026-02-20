@@ -77,11 +77,32 @@ def clear_credentials_from_storage():
 def render_auth_page():
     """Render the authentication page with login and signup tabs."""
     
-    # Check if Supabase is enabled
+    # Check if Supabase is enabled - if not, allow guest access
     if not supabase_enabled():
-        st.error("🔒 Authentication is not available. Please configure Supabase connection.")
-        st.info("Add your Supabase credentials to `.streamlit/secrets.toml`")
+        col1, col2, col3 = st.columns([1, 2, 1])
+        with col2:
+            st.markdown("# 🚀 SkillForge AI")
+            st.markdown("### AI-Powered Skill Gap Identifier & Career Accelerator")
+            st.markdown("---")
+            st.info("🌐 Running in **Guest Mode** — your progress is saved for this session only.")
+            
+            guest_username = st.text_input("Your Name (optional)", placeholder="e.g. Alex", key="guest_name_input")
+            
+            if st.button("▶ Continue as Guest", use_container_width=True, type="primary"):
+                username = guest_username.strip() if guest_username.strip() else "Guest"
+                st.session_state.authenticated = True
+                st.session_state.user = {
+                    "id": "guest",
+                    "email": "guest@local",
+                    "username": username,
+                }
+                st.session_state.profile_name = username
+                st.rerun()
+            
+            st.markdown("---")
+            st.caption("To enable full account features, configure Supabase credentials in deployment settings.")
         st.stop()
+        return
     
     # Center the auth form
     col1, col2, col3 = st.columns([1, 2, 1])
