@@ -20,8 +20,7 @@ An AI-powered career skill gap analyzer that helps users identify their strength
 - **Backend**: Python 3.x
 - **Database**: Supabase PostgreSQL
 - **AI/ML**: HuggingFace API, scikit-learn
-- **Charts**: Plotly
-- **PDF Generation**: xhtml2pdf
+- **Charts**: Plotly, Kaleido
 
 ## Installation
 
