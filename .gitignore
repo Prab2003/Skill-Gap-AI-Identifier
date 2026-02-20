@@ -9,6 +9,7 @@ __pycache__/
 
 # Local config / secrets
 .streamlit/secrets.toml
+.streamlit/saved_login.json
 .env
 .env.local
 

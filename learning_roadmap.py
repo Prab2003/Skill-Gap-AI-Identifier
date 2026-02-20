@@ -2,6 +2,28 @@
 
 from gap_analysis import calculate_skill_gaps
 
+def get_level_description(level):
+    """Get a human-readable description for a skill level"""
+    if level <= 2:
+        return "Beginner - Just starting out"
+    elif level <= 4:
+        return "Elementary - Basic understanding"
+    elif level <= 6:
+        return "Intermediate - Can work independently"
+    elif level <= 8:
+        return "Advanced - Strong proficiency"
+    else:
+        return "Expert - Mastery level"
+
+def get_priority_description(priority_score):
+    """Get a human-readable description for priority score"""
+    if priority_score > 15:
+        return "🔴 Critical - Focus on this first"
+    elif priority_score > 8:
+        return "🟡 Important - High priority"
+    else:
+        return "🟢 Moderate - Can be learned later"
+
 def generate_learning_roadmap(user_scores, role_requirements, weeks=12):
     """Generate a prioritized 4-week learning roadmap based on skill gaps"""
     
@@ -22,7 +44,12 @@ def generate_learning_roadmap(user_scores, role_requirements, weeks=12):
         "status": "📚 Personalized Learning Roadmap",
         "total_skills_to_develop": len(skills_to_learn),
         "estimated_weeks": weeks,
-        "weeks": []
+        "weeks": [],
+        "legend": {
+            "levels": "Skill levels range from 1 (Beginner) to 10 (Expert)",
+            "priority": "Priority indicates how critical this skill is for your target role",
+            "timeline": f"This {weeks}-week plan is personalized based on your current skill gaps"
+        }
     }
     
     # Distribute skills across weeks based on priority
@@ -46,10 +73,14 @@ def generate_learning_roadmap(user_scores, role_requirements, weeks=12):
             
             week_plan["focus_areas"].append({
                 "skill": skill,
-                "current_level": gap_info["current"],
-                "target_level": gap_info["required"],
+                "current_level": round(gap_info["current"], 1),
+                "current_description": get_level_description(gap_info["current"]),
+                "target_level": round(gap_info["required"], 1),
+                "target_description": get_level_description(gap_info["required"]),
+                "levels_to_improve": round(gap_info["gap"], 1),
                 "difficulty": difficulty,
-                "priority": "🔴 High" if gap_info["priority_score"] > 15 else "🟡 Medium" if gap_info["priority_score"] > 8 else "🟢 Low"
+                "priority": get_priority_description(gap_info["priority_score"]),
+                "priority_score": round(gap_info["priority_score"], 1)
             })
         
         # Create daily targets
@@ -125,8 +156,8 @@ def get_learning_path(skill, current_level, target_level):
     
     return {
         "skill": skill,
-        "current_level": current_level,
-        "target_level": target_level,
-        "levels_to_improve": target_level - current_level,
+        "current_level": round(current_level, 1),
+        "target_level": round(target_level, 1),
+        "levels_to_improve": round(target_level - current_level, 1),
         "path": path_stages
     }

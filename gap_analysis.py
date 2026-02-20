@@ -6,17 +6,17 @@ def calculate_skill_gaps(user_scores, role_requirements):
     gaps = {}
 
     for skill, required in role_requirements.items():
-        current = user_scores.get(skill, 0)
-        gap = max(required - current, 0)
+        current = round(user_scores.get(skill, 0), 1)
+        gap = round(max(required - current, 0), 1)
 
         # Priority score: combines gap size and importance
         priority_score = gap * (required / 10) if required > 0 else 0
         
         gaps[skill] = {
             "current": current,
-            "required": required,
+            "required": round(required, 1),
             "gap": gap,
-            "priority_score": round(priority_score, 2),
+            "priority_score": round(priority_score, 1),
             "status": "Strong ✓" if gap == 0 else f"Gap: {gap}"
         }
 
@@ -28,12 +28,12 @@ def identify_strength_areas(user_scores, role_requirements):
     """Identify areas where user meets or exceeds requirements"""
     strengths = {}
     for skill, required in role_requirements.items():
-        current = user_scores.get(skill, 0)
+        current = round(user_scores.get(skill, 0), 1)
         if current >= required:
             strengths[skill] = {
                 "current": current,
-                "required": required,
-                "surplus": current - required
+                "required": round(required, 1),
+                "surplus": round(current - required, 1)
             }
     return strengths
 

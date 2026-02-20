@@ -1,7 +1,9 @@
 import streamlit as st
-import json, datetime
+import json, datetime, random
 import re
+import base64
 import streamlit.components.v1 as components
+from io import BytesIO
 
 from config import APP_NAME, APP_TAGLINE, COLORS
 from ui_components import inject_custom_css, render_header, level_emoji
@@ -13,13 +15,21 @@ from gap_analysis import (
     create_radar_chart,
     create_gap_bar_chart,
 )
-from learning_roadmap import generate_learning_roadmap, generate_recommendation_summary, get_learning_path
+from learning_roadmap import generate_learning_roadmap, generate_recommendation_summary, get_learning_path, get_priority_description
 from quiz_engine import generate_adaptive_quiz, score_quiz
 from ml_models import skill_predictor, personalizer
 from ai_engine import AIEngine
 from resume_parser import extract_skills_from_text
 from voice_assistant import VoiceAssistant
-from supabase_client import supabase_enabled, load_user_state, save_user_state
+from auth_ui import require_auth, render_logout_button
+
+# Try importing xhtml2pdf for PDF generation (works on Windows without external dependencies)
+try:
+    from xhtml2pdf import pisa
+    PDF_AVAILABLE = True
+except ImportError:
+    PDF_AVAILABLE = False
+
 
 # ──────────────────────────────────────────────
 #  Page config
@@ -33,18 +43,29 @@ st.set_page_config(
 inject_custom_css()
 
 # ──────────────────────────────────────────────
+#  Authentication Check - Must be logged in
+# ──────────────────────────────────────────────
+require_auth()
+
+# ──────────────────────────────────────────────
 #  Session state initialisation
 # ──────────────────────────────────────────────
+
+# Load HuggingFace API key from secrets if available
+_hf_key_from_secrets = ""
+try:
+    _hf_key_from_secrets = st.secrets.get("huggingface", {}).get("api_key", "")
+except Exception:
+    pass
+
 _defaults = {
     "user_scores": {},
     "quiz_mode": False,
     "quiz_responses": {},
     "quiz": [],
     "voice_assistant": None,
-    "voice_enabled": False,
-    "voice_output_enabled": True,
     "ai_engine": None,
-    "hf_key": "",
+    "hf_key": _hf_key_from_secrets,
     "profile_name": "",
     "chat_history": [],
     "selected_role": None,
@@ -63,8 +84,6 @@ _defaults = {
     "interview_summary": "",
     "interview_domain": "Mixed",
     "interview_qa": [],
-    "cloud_loaded": False,
-    "last_profile_key": "",
 }
 for k, v in _defaults.items():
     if k not in st.session_state:
@@ -84,10 +103,15 @@ with st.sidebar:
     st.markdown("---")
 
     # HuggingFace API key (optional)
-    hf_key = st.text_input("🔑 HuggingFace API Key (optional)",
-                           value=st.session_state.hf_key,
-                           help="Enables AI Chat Advisor and resume AI extraction")
-    hf_key = hf_key.strip()
+    if _hf_key_from_secrets:
+        st.success("✓ HuggingFace API Key loaded")
+        hf_key = _hf_key_from_secrets
+    else:
+        hf_key = st.text_input("🔑 HuggingFace API Key (optional)",
+                               value=st.session_state.hf_key,
+                               help="Enables AI Chat Advisor and resume AI extraction")
+        hf_key = hf_key.strip()
+    
     if hf_key != st.session_state.hf_key:
         st.session_state.hf_key = hf_key
         st.session_state.ai_engine = AIEngine(api_key=hf_key) if hf_key else AIEngine()
@@ -104,13 +128,6 @@ with st.sidebar:
         st.caption(f"⚠️ API issue: {st.session_state.ai_engine.last_error[:140]}")
 
     st.markdown("---")
-
-    # Voice toggle
-    st.session_state.voice_enabled = st.checkbox("🎤 Voice Mode (experimental)")
-    if st.session_state.voice_enabled:
-        st.session_state.voice_output_enabled = st.checkbox("🔊 Voice Output + Subtitles", value=st.session_state.voice_output_enabled)
-
-    st.markdown("---")
     page = st.radio("Navigate", [
         "🏠 Dashboard",
         "📋 Self-Assessment",
@@ -120,6 +137,9 @@ with st.sidebar:
         "🧠 AI Insights",
         "📄 Export Report",
     ])
+    
+    # Logout button
+    render_logout_button()
 
 # ──────────────────────────────────────────────
 #  Helpers
@@ -132,55 +152,6 @@ def _need_role():
         st.warning("⚠️ Please select a target role on the **Dashboard** page first.")
         return True
     return False
-
-
-def _profile_key() -> str:
-    """Stable, lowercase profile identifier for cloud sync."""
-    return (st.session_state.profile_name or "").strip().lower()
-
-
-def _render_subtitles(text: str):
-    if not text:
-        return
-    subtitle_lines = st.session_state.voice_assistant.build_subtitles(text, words_per_line=9)
-    if not subtitle_lines:
-        return
-
-    subtitle_html = "".join(f'<div class="subtitle-line">{line}</div>' for line in subtitle_lines)
-    st.markdown("**Subtitles**")
-    st.markdown(f'<div class="subtitle-panel">{subtitle_html}</div>', unsafe_allow_html=True)
-
-
-def _speak_browser_tts(text: str, role: str = "assistant"):
-    if not text or not st.session_state.voice_output_enabled:
-        return
-
-    rate = 1.0
-    pitch = 1.0
-    if role == "interviewer":
-        rate = 0.95
-        pitch = 0.95
-    elif role == "candidate":
-        rate = 1.05
-        pitch = 1.05
-
-    payload = json.dumps(text)
-    components.html(
-        f"""
-        <script>
-        const msg = {payload};
-        if ('speechSynthesis' in window && msg) {{
-            window.speechSynthesis.cancel();
-            const utterance = new SpeechSynthesisUtterance(msg);
-            utterance.rate = {rate};
-            utterance.pitch = {pitch};
-            utterance.volume = 1.0;
-            window.speechSynthesis.speak(utterance);
-        }}
-        </script>
-        """,
-        height=0,
-    )
 
 
 def _portfolio_context() -> str:
@@ -224,35 +195,6 @@ if page == "🏠 Dashboard":
             st.markdown(f"**Required skills for {st.session_state.selected_role}:**")
             for skill, lvl in roles[st.session_state.selected_role].items():
                 st.markdown(f"- {skill}: **{lvl}**/10")
-
-    profile_key = _profile_key()
-    if profile_key != st.session_state.last_profile_key:
-        st.session_state.cloud_loaded = False
-        st.session_state.last_profile_key = profile_key
-
-    if supabase_enabled() and profile_key and not st.session_state.cloud_loaded:
-        remote = load_user_state(profile_key)
-        st.session_state.cloud_loaded = True
-        if remote:
-            st.session_state.user_scores.update(remote.get("user_scores", {}))
-            st.session_state.resume_text = remote.get("resume_text", st.session_state.resume_text)
-            st.session_state.resume_skills = remote.get("resume_skills", st.session_state.resume_skills)
-            st.session_state.selected_role = remote.get("selected_role", st.session_state.selected_role)
-            st.success("☁️ Loaded your profile from Supabase")
-
-    if supabase_enabled() and profile_key:
-        if st.button("☁️ Save to Supabase", key="btn_save_supabase"):
-            payload = {
-                "profile_name": st.session_state.profile_name,
-                "selected_role": st.session_state.selected_role,
-                "user_scores": st.session_state.user_scores,
-                "resume_text": st.session_state.resume_text,
-                "resume_skills": st.session_state.resume_skills,
-            }
-            if save_user_state(profile_key, payload):
-                st.success("Saved to Supabase")
-            else:
-                st.error("Could not save to Supabase")
 
     st.markdown("---")
 
@@ -329,8 +271,8 @@ elif page == "📋 Self-Assessment":
         with c1:
             val = st.slider(
                 skill,
-                min_value=0, max_value=10,
-                value=st.session_state.user_scores.get(skill, 5),
+                min_value=0.0, max_value=10.0, step=0.5,
+                value=float(st.session_state.user_scores.get(skill, 5)),
                 key=f"sa_{skill}",
             )
             st.session_state.user_scores[skill] = val
@@ -377,28 +319,48 @@ elif page == "❓ Adaptive Quiz":
 
         st.progress(
             len(st.session_state.quiz_responses) / len(quiz),
-            text=f"Answered {len(st.session_state.quiz_responses)}/{len(quiz)}",
+            text=f"Answered {len(st.session_state.quiz_responses)}/{len(quiz)} questions",
         )
+        
+        st.markdown("---")
 
-        for q in quiz:
+        for idx, q in enumerate(quiz, 1):
             qid = q["id"]
             with st.container(border=True):
-                st.markdown(f"**Q{qid+1}.** [{q['difficulty'].title()}] *{q['skill']}*")
+                st.markdown(f"**Question {idx} of {len(quiz)}** | [{q['difficulty'].title()}] *{q['skill']}*")
                 st.write(q["question"])
+                
+                # Check if already answered
+                current_answer = st.session_state.quiz_responses.get(qid)
+                default_index = None
+                if current_answer is not None:
+                    default_index = current_answer
+                
                 chosen = st.radio(
-                    "Select answer",
+                    "Select your answer:",
                     options=q["options"],
-                    index=None,
+                    index=default_index,
                     key=f"quiz_opt_{qid}",
                 )
+                
                 if chosen is not None:
                     st.session_state.quiz_responses[qid] = q["options"].index(chosen)
+        
+        st.markdown("---")
+        
+        # Show completion status
+        answered = len(st.session_state.quiz_responses)
+        total = len(quiz)
+        if answered == total:
+            st.success(f"✅ All {total} questions answered! Ready to submit.")
+        else:
+            st.warning(f"⚠️ {total - answered} question(s) remaining")
 
         col_sub, col_cancel = st.columns(2)
         with col_sub:
-            if st.button("✅ Submit Quiz", type="primary"):
+            if st.button("✅ Submit Quiz", type="primary", disabled=(answered < total)):
                 if len(st.session_state.quiz_responses) < len(quiz):
-                    st.error("Please answer all questions before submitting.")
+                    st.error(f"Please answer all {total} questions before submitting. ({answered}/{total} answered)")
                 else:
                     results = score_quiz(quiz, st.session_state.quiz_responses)
                     st.session_state.quiz_mode = False
@@ -463,7 +425,7 @@ elif page == "📊 Gap Analysis":
                     c1, c2, c3 = st.columns([2, 2, 1])
                     with c1:
                         st.write(f"**{skill}**")
-                        st.caption(f"Current {d['current']} → Target {d['required']}  |  Gap: {d['gap']}")
+                        st.caption(f"Current {round(d['current'], 1)} → Target {round(d['required'], 1)}  |  Gap: {round(d['gap'], 1)}")
                     with c2:
                         st.progress(d["current"] / d["required"] if d["required"] else 1)
                     with c3:
@@ -478,8 +440,19 @@ elif page == "📊 Gap Analysis":
 
     with tab_strengths:
         if strengths:
+            st.write(f"💪 You have **{len(strengths)}** skill(s) at or above target level:")
+            st.write("")
             for skill, d in strengths.items():
-                st.write(f"✅ **{skill}** — level {d['current']} (exceeds target by **+{d['surplus']}**)")
+                with st.container(border=True):
+                    c1, c2 = st.columns([3, 1])
+                    with c1:
+                        st.write(f"✅ **{skill}**")
+                        st.caption(f"Your level: {round(d['current'], 1)} | Target: {round(d['required'], 1)} | Exceeds by: +{round(d['surplus'], 1)}")
+                    with c2:
+                        if d['surplus'] > 0:
+                            st.success(f"+{round(d['surplus'], 1)} above")
+                        else:
+                            st.info("At target")
         else:
             st.info("Complete the assessment to see your strengths.")
 
@@ -507,13 +480,44 @@ elif page == "🗺️ Learning Roadmap":
 
     st.markdown("---")
     st.subheader("📅 Weekly Plan")
+    
+    # Add informative legend
+    with st.expander("ℹ️ Understanding Your Roadmap", expanded=False):
+        st.markdown("""
+        **Skill Levels Explained:**
+        - **1-2**: Beginner - Just starting out, learning basics
+        - **3-4**: Elementary - Basic understanding, can follow tutorials
+        - **5-6**: Intermediate - Can work independently on tasks
+        - **7-8**: Advanced - Strong proficiency, can solve complex problems
+        - **9-10**: Expert - Mastery level, can teach and innovate
+        
+        **Priority Indicators:**
+        - 🔴 **Critical**: Essential for the role, focus on this immediately
+        - 🟡 **Important**: High priority, should be learned soon
+        - 🟢 **Moderate**: Nice to have, can be learned later
+        
+        **Effort Required:**
+        - Each level typically requires 1-2 weeks of focused learning (10-15 hours/week)
+        - The plan assumes consistent daily practice for best results
+        """)
 
     if roadmap["weeks"]:
         for week in roadmap["weeks"]:
-            with st.expander(f"**Week {week['week']}**", expanded=(week["week"] == 1)):
+            with st.expander(f"**Week {week['week']}** - Skills to Focus On", expanded=(week["week"] == 1)):
                 for f in week["focus_areas"]:
-                    st.write(f"**{f['skill']}** {f['priority']}  |  Level {f['current_level']} → {f['target_level']}  |  {f['difficulty']}")
-                st.write("**Daily targets:**")
+                    st.markdown(f"### 🎯 {f['skill']}")
+                    
+                    col1, col2 = st.columns([2, 1])
+                    with col1:
+                        st.write(f"**Current Level:** {round(f['current_level'], 1)}/10 - _{f['current_description']}_")
+                        st.write(f"**Target Level:** {round(f['target_level'], 1)}/10 - _{f['target_description']}_")
+                        st.write(f"**Improvement Needed:** {round(f['levels_to_improve'], 1)} levels ({f['difficulty']} track)")
+                    with col2:
+                        st.info(f"{f['priority']}")
+                    
+                    st.divider()
+                
+                st.write("**📋 Daily Study Targets:**")
                 for t in week["daily_targets"]:
                     st.write(f"  • {t}")
     else:
@@ -522,9 +526,16 @@ elif page == "🗺️ Learning Roadmap":
     # Resources
     st.markdown("---")
     st.subheader("📚 Recommended Resources")
+    st.caption("Curated learning materials prioritized by your skill gaps")
+    
     priority_skills = [s for s in gaps if gaps[s]["gap"] > 0]
     for rank, skill in enumerate(priority_skills[:5], 1):
-        with st.expander(f"{rank}. {skill} (priority {gaps[skill]['priority_score']})"):
+        gap_info = gaps[skill]
+        priority_label = get_priority_description(gap_info['priority_score']) if 'learning_roadmap' in dir() else f"Priority Score: {gap_info['priority_score']:.0f}/20"
+        
+        with st.expander(f"{rank}. {skill} - {priority_label}"):
+            st.write(f"**Gap to Close:** {round(gap_info['current'], 1)}/10 → {round(gap_info['required'], 1)}/10 ({round(gap_info['gap'], 1)} levels)")
+            
             if skill in resources:
                 for r in resources[skill]:
                     c1, c2, c3 = st.columns([3, 1, 1])
@@ -551,36 +562,42 @@ elif page == "🧠 AI Insights":
 
     # ---- ML Predictions ----
     st.subheader("⏰ ML Time-to-Target Predictions")
-    weekly_hours = st.slider("Hours you can study per week", 5, 40, 15)
+    st.caption("AI-powered estimates based on your current level, target level, and study hours")
+    
+    weekly_hours = st.slider("Hours you can study per week", 5, 40, 15, 
+                             help="More hours = faster progress. Typical: 10-20 hours/week")
 
     predictions = []
     for skill, d in gaps.items():
         if d["gap"] > 0:
             weeks_needed = skill_predictor.predict_weeks_to_target(d["current"], d["required"], weekly_hours)
             predictions.append({"skill": skill, "current": d["current"], "target": d["required"],
-                                "weeks": weeks_needed, "priority": d["priority_score"]})
+                                "weeks": weeks_needed, "priority": d["priority_score"], "gap": d["gap"]})
     predictions.sort(key=lambda x: x["priority"], reverse=True)
 
     for p in predictions:
         with st.container(border=True):
             c1, c2, c3, c4 = st.columns(4)
             c1.write(f"**{p['skill']}**")
-            c2.write(f"Level {p['current']} → {p['target']}")
-            c3.write(f"⏱️ {p['weeks']:.1f} weeks")
+            c2.write(f"📊 Level {round(p['current'], 1)} → {round(p['target'], 1)} ({round(p['gap'], 1)} levels)")
+            c3.write(f"⏱️ ~{p['weeks']:.1f} weeks")
             if p["weeks"] <= 4:
-                c4.success("Quick")
+                c4.success("⚡ Quick win")
             elif p["weeks"] <= 8:
-                c4.warning("Medium")
+                c4.warning("📅 Medium term")
             else:
-                c4.error("Long")
+                c4.error("🎯 Long term")
 
     # Optimal order
     st.markdown("---")
     st.subheader("🎯 Optimal Skill Learning Order")
+    st.caption("Prioritized based on role requirements, skill gaps, and learning efficiency")
+    
     order = personalizer.get_optimal_skill_order(gaps, reqs)
     for rank, skill in enumerate(order, 1):
         if gaps.get(skill, {}).get("gap", 0) > 0:
-            st.write(f"**{rank}.** {skill} (priority {gaps[skill]['priority_score']:.1f})")
+            priority_desc = get_priority_description(gaps[skill]['priority_score'])
+            st.write(f"**{rank}.** {skill} - {priority_desc}")
 
     # ---- AI Chat ----
     st.markdown("---")
@@ -589,207 +606,296 @@ elif page == "🧠 AI Insights":
 
     ai: AIEngine = st.session_state.ai_engine
 
-    if st.session_state.voice_enabled:
-        st.markdown("---")
-        st.subheader("🎙️ Voice Interview Assistant")
-        st.caption("Choose a mode: interviewer asks questions, or coach mode helps you improve answers.")
+    st.markdown("---")
+    st.subheader("📝 Knowledge Test & Voice Coaching")
+    st.caption("Take adaptive tests with instant feedback, or get voice coaching help.")
 
-        mode = st.radio(
-            "Voice Mode",
-            ["Question Asking Mode", "Help Mode"],
-            horizontal=True,
-            key="voice_mode_selector",
-        )
+    mode = st.radio(
+        "Select Mode",
+        ["Test Mode", "Help Mode"],
+        horizontal=True,
+        key="voice_mode_selector",
+    )
 
-        va = st.session_state.voice_assistant
-        top_gaps = [skill for skill in gaps if gaps[skill]["gap"] > 0][:3]
-        top_gaps_text = ", ".join(top_gaps) if top_gaps else "general interview readiness"
+    va = st.session_state.voice_assistant
+    top_gaps = [skill for skill in gaps if gaps[skill]["gap"] > 0][:5]
+    top_gaps_text = ", ".join(top_gaps) if top_gaps else "general skills"
 
-        if mode == "Question Asking Mode":
-            st.caption("Run a realistic multi-round interview: AI interviewer asks, you answer by voice, then receive round-by-round evaluation and final verdict.")
+    if mode == "Test Mode":
+        st.caption("📝 Take a real-time knowledge test with questions tailored to your weak areas. Get instant scoring and improvement recommendations.")
 
-            cfg1, cfg2, cfg3 = st.columns([1.4, 1, 1])
-            with cfg1:
-                interview_domain = st.selectbox("Interview Type", ["Mixed", "Technical", "Behavioral", "Problem Solving"], index=0)
-            with cfg2:
-                rounds = st.slider("Rounds", 2, 5, st.session_state.interview_rounds)
-            with cfg3:
-                if st.session_state.interview_active:
-                    st.success("Live Interview")
-                else:
-                    st.info("Not Started")
+        cfg1, cfg2 = st.columns([2, 1])
+        with cfg1:
+            test_domain = st.selectbox(
+                "Test Focus Area", 
+                ["Weakest Skills (Adaptive)", "Technical Skills", "Behavioral & Soft Skills", "Mixed - All Skills"],
+                index=0,
+                help="Choose which areas to test"
+            )
+        with cfg2:
+            num_questions = st.slider("Questions", 3, 10, 5, help="Number of test questions")
 
-            st.session_state.interview_rounds = rounds
+        # Initialize test state
+        if 'test_active' not in st.session_state:
+            st.session_state.test_active = False
+        if 'test_questions' not in st.session_state:
+            st.session_state.test_questions = []
+        if 'test_current_index' not in st.session_state:
+            st.session_state.test_current_index = 0
+        if 'test_answers' not in st.session_state:
+            st.session_state.test_answers = []
+        if 'test_scores' not in st.session_state:
+            st.session_state.test_scores = []
+        if 'test_feedback' not in st.session_state:
+            st.session_state.test_feedback = []
 
-            b1, b2 = st.columns(2)
-            with b1:
-                if st.button("🎬 Start Mock Interview", key="start_interview_btn", type="primary"):
-                    st.session_state.interview_active = True
-                    st.session_state.interview_current_round = 0
-                    st.session_state.interview_questions = []
-                    st.session_state.interview_feedback = []
-                    st.session_state.interview_scores = []
-                    st.session_state.interview_summary = ""
-                    st.session_state.interview_domain = interview_domain
-                    st.session_state.interview_qa = []
+        b1, b2 = st.columns(2)
+        with b1:
+            if st.button("🎯 Start Test", key="start_test_btn", type="primary", disabled=st.session_state.test_active):
+                # Generate all test questions upfront
+                st.session_state.test_active = True
+                st.session_state.test_current_index = 0
+                st.session_state.test_answers = []
+                st.session_state.test_scores = []
+                st.session_state.test_feedback = []
+                st.session_state.test_questions = []
 
-                    portfolio_ctx = _portfolio_context()
+                with st.spinner("Generating personalized test questions..."):
+                    # Determine focus based on selection
+                    if "Weakest" in test_domain:
+                        focus_skills = top_gaps[:num_questions]
+                        test_type = "adaptive weakness"
+                    elif "Technical" in test_domain:
+                        tech_skills = [s for s in gaps.keys() if any(kw in s.lower() for kw in ['python', 'java', 'sql', 'cloud', 'api', 'framework', 'algorithm', 'data structure'])]
+                        focus_skills = tech_skills[:num_questions] if tech_skills else list(gaps.keys())[:num_questions]
+                        test_type = "technical"
+                    elif "Behavioral" in test_domain:
+                        soft_skills = [s for s in gaps.keys() if any(kw in s.lower() for kw in ['communication', 'leadership', 'teamwork', 'problem solving', 'collaboration', 'management'])]
+                        focus_skills = soft_skills[:num_questions] if soft_skills else list(gaps.keys())[:num_questions]
+                        test_type = "behavioral"
+                    else:
+                        focus_skills = list(gaps.keys())[:num_questions]
+                        test_type = "mixed"
 
-                    first_q_prompt = (
-                        f"You are an experienced interviewer for role {st.session_state.selected_role}. "
-                        f"Interview type is {interview_domain}. "
-                        f"Use this candidate portfolio context: {portfolio_ctx}. "
-                        f"Ask round 1 of {rounds}. Focus on these gaps: {top_gaps_text}. "
-                        "Ask a question that references the candidate's portfolio/project experience when possible. "
-                        "Return ONLY one concise interviewer question."
-                    )
-                    first_question = ai.chat(first_q_prompt)
-                    st.session_state.current_interview_question = first_question
-                    st.session_state.interview_questions.append(first_question)
+                    # Generate questions
+                    for i, skill in enumerate(focus_skills[:num_questions], 1):
+                        skill_level = st.session_state.user_scores.get(skill, 1)
+                        gap_size = gaps.get(skill, {}).get('gap', 0)
+                        
+                        question_prompt = (
+                            f"You are testing knowledge for the role: {st.session_state.selected_role}. "
+                            f"Generate ONE {test_type} question for the skill: {skill}. "
+                            f"Candidate's current level: {skill_level}/10, Gap: {gap_size}. "
+                            f"Question difficulty should match their current level + 1. "
+                            f"Make it practical and scenario-based when possible. "
+                            f"Return ONLY the question text, no numbering or prefix."
+                        )
+                        question = ai.chat(question_prompt)
+                        st.session_state.test_questions.append({
+                            'id': i,
+                            'skill': skill,
+                            'question': question,
+                            'level': skill_level,
+                            'gap': gap_size
+                        })
+                
+                st.success(f"✅ Test ready with {len(st.session_state.test_questions)} questions!")
+                st.rerun()
 
-                    intro = f"Welcome to your mock interview for {st.session_state.selected_role}. Let's begin. {first_question}"
-                    _render_subtitles(intro)
-                    _speak_browser_tts(intro, role="interviewer")
+        with b2:
+            if st.button("🛑 End Test", key="end_test_btn", disabled=not st.session_state.test_active):
+                st.session_state.test_active = False
+                st.session_state.test_current_index = 0
 
-            with b2:
-                if st.button("🛑 End Interview", key="end_interview_btn"):
-                    st.session_state.interview_active = False
-                    st.session_state.current_interview_question = ""
+        # Display test questions
+        if st.session_state.test_active and st.session_state.test_questions:
+            current_idx = st.session_state.test_current_index
+            total_questions = len(st.session_state.test_questions)
 
-            if st.session_state.interview_active and st.session_state.current_interview_question:
-                round_no = st.session_state.interview_current_round + 1
-                st.progress(round_no / st.session_state.interview_rounds, text=f"Round {round_no} of {st.session_state.interview_rounds}")
-                st.markdown(f"**Interviewer (Round {round_no}):** {st.session_state.current_interview_question}")
+            if current_idx < total_questions:
+                # Show progress
+                progress_val = min(1.0, (current_idx + 1) / total_questions)
+                st.progress(progress_val, text=f"Question {current_idx + 1} of {total_questions}")
+                
+                current_q = st.session_state.test_questions[current_idx]
+                
+                # Display question
+                st.markdown("---")
+                st.markdown(f"### 📝 Question {current_q['id']}")
+                st.info(f"**Skill Being Tested:** {current_q['skill']} (Your level: {round(current_q['level'], 1)}/10, Gap: {round(current_q['gap'], 1)})")
+                st.markdown(f"**Question:** {current_q['question']}")
+                
+                # Answer input
+                answer_key = f"test_answer_{current_idx}"
+                user_answer = st.text_area(
+                    "Your Answer:",
+                    height=150,
+                    key=answer_key,
+                    placeholder="Type your answer here... Be specific and detailed."
+                )
 
-                answer_audio = st.audio_input(f"Record your answer for Round {round_no}", key=f"voice_answer_audio_round_{round_no}")
-                if answer_audio is not None:
-                    answer_bytes = answer_audio.getvalue()
-                    st.audio(answer_bytes, format="audio/wav")
-
-                    if st.button(f"✅ Submit Answer (Round {round_no})", key=f"evaluate_voice_answer_btn_round_{round_no}"):
-                        transcript = va.transcribe_audio_bytes(answer_bytes)
-
-                        if not transcript:
-                            st.error("Could not transcribe your answer. Please retry in a quieter environment.")
-                        else:
-                            analysis = va.analyze_transcript(transcript)
-                            st.session_state.last_voice_transcript = transcript
-                            st.session_state.last_voice_analysis = analysis
-                            st.session_state.interview_qa.append({
-                                "round": round_no,
-                                "question": st.session_state.current_interview_question,
-                                "answer": transcript,
-                            })
-
-                            st.markdown(f"**Your Answer Transcript:** {transcript}")
-                            user_echo = f"Candidate response recorded. You said: {transcript}"
-                            _render_subtitles(user_echo)
-                            _speak_browser_tts(user_echo, role="candidate")
-                            c1, c2, c3, c4 = st.columns(4)
-                            c1.metric("Words", analysis.get("word_count", 0))
-                            c2.metric("Confidence", analysis.get("confidence", "Low"))
-                            c3.metric("Sentiment", analysis.get("sentiment", "Neutral"))
-                            c4.metric("Complexity", analysis.get("complexity", "Low"))
-
-                            interviewer_prompt = (
-                                f"Act as a strict but fair interviewer for role {st.session_state.selected_role}. "
-                                f"Interview type: {st.session_state.interview_domain}. "
-                                f"Question asked: {st.session_state.current_interview_question}. "
-                                f"Candidate spoken answer transcript: {transcript}. "
-                                "Return this exact structure: "
-                                "Impression: <1 sentence>\n"
-                                "Score: X/10\n"
-                                "Strong points:\n- ...\n- ...\n"
-                                "Improvements:\n- ...\n- ...\n"
-                                "Better sample answer:\n<3-4 lines>"
+                col1, col2, col3 = st.columns([1, 1, 2])
+                with col1:
+                    submit_disabled = not user_answer or len(user_answer.strip()) < 10
+                    if st.button("✅ Submit Answer", key=f"submit_{current_idx}", type="primary", disabled=submit_disabled):
+                        # Evaluate the answer
+                        with st.spinner("🤖 AI is evaluating your answer..."):
+                            eval_prompt = (
+                                f"You are an expert evaluator for the role: {st.session_state.selected_role}. "
+                                f"Skill being tested: {current_q['skill']}. "
+                                f"Question: {current_q['question']}. "
+                                f"Candidate's answer: {user_answer}. "
+                                f"Candidate's current skill level: {current_q['level']}/10. "
+                                f"\n\nProvide evaluation in this EXACT format:"
+                                f"\n\nScore: X/10"
+                                f"\n\n✅ Strong Points:"
+                                f"\n- [point 1]"
+                                f"\n- [point 2]"
+                                f"\n\n⚠️ Areas to Improve:"
+                                f"\n- [improvement 1]"
+                                f"\n- [improvement 2]"
+                                f"\n\n💡 Better Answer Approach:"
+                                f"\n[3-4 sentences showing a stronger answer]"
+                                f"\n\n🎯 Recommendation:"
+                                f"\n[Specific advice on how to improve this skill]"
                             )
-
-                            with st.spinner("Interviewer is evaluating your answer…"):
-                                interviewer_reply = ai.chat(interviewer_prompt)
-
-                            score = _extract_interview_score(interviewer_reply)
-                            st.session_state.interview_feedback.append(interviewer_reply)
-                            st.session_state.interview_scores.append(score)
-                            st.session_state.last_voice_reply = interviewer_reply
-
-                            st.session_state.chat_history.append({"role": "user", "content": f"🎤 Interview answer (R{round_no}): {transcript}"})
-                            st.session_state.chat_history.append({"role": "assistant", "content": interviewer_reply})
-
-                            st.markdown("**Interviewer Feedback**")
-                            st.markdown(interviewer_reply)
-                            _render_subtitles(interviewer_reply)
-                            _speak_browser_tts(interviewer_reply, role="interviewer")
-
-                            is_last_round = round_no >= st.session_state.interview_rounds
-                            if not is_last_round:
-                                asked_questions = " | ".join(st.session_state.interview_questions)
-                                qa_history = " | ".join(
-                                    [f"Q{qa['round']}: {qa['question']} A: {qa['answer']}" for qa in st.session_state.interview_qa]
-                                )
-                                portfolio_ctx = _portfolio_context()
-                                next_round = round_no + 1
-                                next_q_prompt = (
-                                    f"You are interviewing for role {st.session_state.selected_role}. "
-                                    f"Interview type: {st.session_state.interview_domain}. "
-                                    f"Candidate portfolio context: {portfolio_ctx}. "
-                                    f"Previous Q&A history: {qa_history}. "
-                                    f"Ask round {next_round} of {st.session_state.interview_rounds}. "
-                                    f"Avoid repeating these questions: {asked_questions}. "
-                                    f"Focus on gaps: {top_gaps_text}. "
-                                    "Make it continuous from candidate's previous answer (follow-up when relevant). "
-                                    "Return only one concise question."
-                                )
-                                next_question = ai.chat(next_q_prompt)
-                                st.session_state.current_interview_question = next_question
-                                st.session_state.interview_questions.append(next_question)
-                                st.session_state.interview_current_round += 1
-                                st.success("Round completed. Next question is ready.")
-                                _render_subtitles(next_question)
-                                _speak_browser_tts(next_question, role="interviewer")
+                            
+                            feedback = ai.chat(eval_prompt)
+                            
+                            # Extract score
+                            score = 5  # default
+                            import re
+                            score_match = re.search(r'Score:\s*(\d+(?:\.\d+)?)\s*/\s*10', feedback)
+                            if score_match:
+                                score = float(score_match.group(1))
+                            
+                            # Store results
+                            st.session_state.test_answers.append(user_answer)
+                            st.session_state.test_scores.append(score)
+                            st.session_state.test_feedback.append({
+                                'question': current_q['question'],
+                                'skill': current_q['skill'],
+                                'answer': user_answer,
+                                'score': score,
+                                'feedback': feedback
+                            })
+                            
+                            # Show immediate feedback
+                            st.markdown("---")
+                            st.markdown("### 📊 Your Score & Feedback")
+                            
+                            score_color = "🟢" if score >= 7 else "🟡" if score >= 5 else "🔴"
+                            st.metric("Score", f"{score}/10", delta=f"{score_color}")
+                            
+                            st.markdown(feedback)
+                            
+                            # Move to next question
+                            if current_idx + 1 < total_questions:
+                                st.session_state.test_current_index += 1
+                                if st.button("➡️ Next Question", key=f"next_{current_idx}", type="primary"):
+                                    st.rerun()
                             else:
-                                avg_score = round(sum(st.session_state.interview_scores) / max(len(st.session_state.interview_scores), 1), 2)
-                                final_prompt = (
-                                    f"You are an interview panel summarizing a mock interview for role {st.session_state.selected_role}. "
-                                    f"Round scores: {st.session_state.interview_scores}. Average score: {avg_score}/10. "
-                                    f"Round feedback notes: {' || '.join(st.session_state.interview_feedback)}. "
-                                    "Provide final result in this format: "
-                                    "Overall Verdict: Hire / Borderline / No-Hire\n"
-                                    "Panel Summary (3 bullets)\n"
-                                    "Top 3 action items before next interview."
-                                )
-                                with st.spinner("Interview panel is deciding…"):
-                                    final_summary = ai.chat(final_prompt)
+                                st.success("🎉 Test completed! View your results below.")
+                                st.session_state.test_active = False
+                                
+                            st.rerun()
+                
+                with col2:
+                    if st.button("⏭️ Skip Question", key=f"skip_{current_idx}"):
+                        st.session_state.test_answers.append("(Skipped)")
+                        st.session_state.test_scores.append(0)
+                        st.session_state.test_feedback.append({
+                            'question': current_q['question'],
+                            'skill': current_q['skill'],
+                            'answer': "(Skipped)",
+                            'score': 0,
+                            'feedback': "Question skipped - no evaluation available."
+                        })
+                        st.session_state.test_current_index += 1
+                        st.rerun()
 
-                                st.session_state.interview_summary = final_summary
-                                st.session_state.interview_active = False
-                                st.session_state.current_interview_question = ""
+        # Show test results summary
+        if not st.session_state.test_active and st.session_state.test_scores:
+            st.markdown("---")
+            st.markdown("## 📊 Test Results Summary")
+            
+            total_score = sum(st.session_state.test_scores)
+            max_score = len(st.session_state.test_scores) * 10
+            avg_score = total_score / len(st.session_state.test_scores)
+            percentage = (total_score / max_score) * 100
+            
+            # Performance metrics
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("Total Score", f"{total_score}/{max_score}")
+            col2.metric("Average", f"{avg_score:.1f}/10")
+            col3.metric("Percentage", f"{percentage:.1f}%")
+            
+            grade = "A+" if percentage >= 90 else "A" if percentage >= 80 else "B" if percentage >= 70 else "C" if percentage >= 60 else "D" if percentage >= 50 else "F"
+            col4.metric("Grade", grade)
+            
+            # Performance interpretation
+            if percentage >= 80:
+                st.success(f"🎉 Excellent performance! You demonstrated strong knowledge in {test_domain}.")
+            elif percentage >= 60:
+                st.info(f"👍 Good effort! You have a solid foundation but there's room for improvement.")
+            else:
+                st.warning(f"📚 Keep learning! Focus on strengthening these skills through practice and study.")
+            
+            # Detailed feedback for each question
+            with st.expander("📋 View Detailed Feedback for All Questions", expanded=False):
+                for i, fb in enumerate(st.session_state.test_feedback, 1):
+                    st.markdown(f"### Question {i}: {fb['skill']}")
+                    st.markdown(f"**Q:** {fb['question']}")
+                    st.markdown(f"**Your Answer:** {fb['answer']}")
+                    st.markdown(f"**Score:** {fb['score']}/10")
+                    st.markdown(fb['feedback'])
+                    st.markdown("---")
+            
+            # Overall recommendations
+            st.markdown("### 🎯 Overall Recommendations")
+            weak_areas = [fb['skill'] for fb in st.session_state.test_feedback if fb['score'] < 6]
+            strong_areas = [fb['skill'] for fb in st.session_state.test_feedback if fb['score'] >= 8]
+            
+            if strong_areas:
+                st.success(f"**✅ Strong Areas:** {', '.join(strong_areas)}")
+            if weak_areas:
+                st.warning(f"**⚠️ Focus on improving:** {', '.join(weak_areas)}")
+            
+            # Action plan
+            st.markdown("**📈 Next Steps:**")
+            if weak_areas:
+                st.markdown(f"1. Review learning materials for: {', '.join(weak_areas[:3])}")
+                st.markdown("2. Practice with real projects or case studies")
+                st.markdown("3. Retake the test to track your improvement")
+            else:
+                st.markdown("1. Continue building on your strong foundation")
+                st.markdown("2. Challenge yourself with advanced topics")
+                st.markdown("3. Consider sharing your knowledge by mentoring others")
 
-                                st.markdown("### 🧾 Final Interview Result")
-                                st.metric("Average Score", f"{avg_score}/10")
-                                st.markdown(final_summary)
-                                _render_subtitles(final_summary)
-                                _speak_browser_tts(final_summary, role="interviewer")
+    else:
+        st.caption("Help mode: tell your problem by voice and receive spoken coaching guidance.")
 
-            elif st.session_state.interview_summary:
-                avg_score = round(sum(st.session_state.interview_scores) / max(len(st.session_state.interview_scores), 1), 2)
-                st.markdown("### 🧾 Last Interview Result")
-                st.metric("Average Score", f"{avg_score}/10")
-                st.markdown(st.session_state.interview_summary)
+        # Initialize coaching session state
+        if 'coaching_active' not in st.session_state:
+            st.session_state.coaching_active = False
+        if 'coaching_response' not in st.session_state:
+            st.session_state.coaching_response = ""
 
-        else:
-            st.caption("Help mode: tell your problem by voice and receive spoken coaching guidance.")
+        help_audio = st.audio_input("Record what you need help with", key="voice_help_audio")
+        if help_audio is not None:
+            help_bytes = help_audio.getvalue()
+            st.audio(help_bytes, format="audio/wav")
 
-            help_audio = st.audio_input("Record what you need help with", key="voice_help_audio")
-            if help_audio is not None:
-                help_bytes = help_audio.getvalue()
-                st.audio(help_bytes, format="audio/wav")
-
-                if st.button("🆘 Get Voice Coaching Help", key="voice_help_btn", type="primary"):
+            col1, col2 = st.columns([2, 1])
+            
+            with col1:
+                if st.button("🆘 Get Voice Coaching Help", key="voice_help_btn", type="primary", disabled=st.session_state.coaching_active):
                     transcript = va.transcribe_audio_bytes(help_bytes)
 
                     if not transcript:
                         st.error("Could not transcribe your voice message. Please retry.")
                     else:
+                        st.session_state.coaching_active = True
                         analysis = va.analyze_transcript(transcript)
                         st.session_state.last_voice_transcript = transcript
                         st.session_state.last_voice_analysis = analysis
@@ -813,14 +919,39 @@ elif page == "🧠 AI Insights":
                         with st.spinner("Generating coaching response…"):
                             help_reply = ai.chat(help_prompt)
 
+                        st.session_state.coaching_response = help_reply
                         st.session_state.last_voice_reply = help_reply
                         st.session_state.chat_history.append({"role": "user", "content": f"🎤 Help request: {transcript}"})
                         st.session_state.chat_history.append({"role": "assistant", "content": help_reply})
 
                         st.markdown("**Coach Response**")
                         st.markdown(help_reply)
-                        _render_subtitles(help_reply)
-                        _speak_browser_tts(help_reply, role="interviewer")
+            
+            with col2:
+                if st.button("⏹️ End Session", key="end_coaching_btn", type="secondary", disabled=not st.session_state.coaching_active):
+                    st.session_state.coaching_active = False
+                    
+                    # Generate a warm closing message
+                    farewell_messages = [
+                        "Great work today! Remember, practice makes progress. Feel free to come back anytime! 👋",
+                        "You're on the right track! Keep practicing and you'll see improvement. Good luck! 🌟",
+                        "Session ended. Thank you for your time today. Keep working on those skills! 💪",
+                        "Nice working with you! Remember to review the feedback and practice regularly. See you next time! 😊",
+                        "Coaching session complete! You've got this - stay focused and keep improving! 🎯"
+                    ]
+                    farewell = random.choice(farewell_messages)
+                    
+                    st.success(farewell)
+                    st.session_state.chat_history.append({"role": "assistant", "content": f"🤝 {farewell}"})
+                    
+                    st.session_state.coaching_response = ""
+                    st.rerun()
+
+        # Show current coaching response if active
+        if st.session_state.coaching_active and st.session_state.coaching_response:
+            with st.expander("📋 Current Coaching Session", expanded=True):
+                st.info("💡 Coaching session is active. Review the guidance above and click 'End Session' when you're ready to finish.")
+                st.markdown(st.session_state.coaching_response)
 
     # Show chat history
     for msg in st.session_state.chat_history:
@@ -841,10 +972,6 @@ elif page == "🧠 AI Insights":
             with st.spinner("Thinking…"):
                 reply = ai.chat(prompt, context=ctx)
             st.markdown(reply)
-
-            if st.session_state.voice_enabled and st.session_state.voice_output_enabled:
-                _render_subtitles(reply)
-                _speak_browser_tts(reply, role="interviewer")
 
         st.session_state.chat_history.append({"role": "assistant", "content": reply})
 
@@ -868,65 +995,415 @@ elif page == "📄 Export Report":
     today = datetime.date.today().strftime("%B %d, %Y")
 
     # Build HTML report
+    
+    # Executive summary
+    total_gaps = len([g for g in gaps.values() if g['gap'] > 0])
+    avg_gap = round(sum(g['gap'] for g in gaps.values()) / len(gaps), 1) if gaps else 0
+    critical_gaps = [s for s, d in gaps.items() if d['priority_score'] > 15]
+    
+    # Readiness interpretation
+    if readiness >= 90:
+        readiness_msg = "Excellent! You're highly qualified for this role."
+        readiness_color = "#4ecdc4"
+    elif readiness >= 70:
+        readiness_msg = "Good! You have most of the required skills. Focus on closing key gaps."
+        readiness_color = "#90a0f0"
+    elif readiness >= 50:
+        readiness_msg = "Fair. You're on the right track but need to develop several skills."
+        readiness_color = "#ffd93d"
+    else:
+        readiness_msg = "Getting started. Focus on building foundational skills first."
+        readiness_color = "#ff6b6b"
+    
+    # Detailed gap rows with recommendations
     gap_rows = ""
     for s, d in gaps.items():
-        color = "#ff6b6b" if d["gap"] > 3 else "#ffd93d" if d["gap"] > 0 else "#4ecdc4"
-        gap_rows += (
-            f"<tr><td>{s}</td><td>{d['current']}</td><td>{d['required']}</td>"
-            f"<td style='color:{color};font-weight:700'>{d['gap']}</td>"
-            f"<td>{d['priority_score']}</td></tr>\n"
-        )
+        if d["gap"] > 0:
+            color = "#ff6b6b" if d["gap"] > 3 else "#ffd93d" if d["gap"] > 0 else "#4ecdc4"
+            priority_badge = "🔴 CRITICAL" if d["priority_score"] > 15 else "🟡 HIGH" if d["priority_score"] > 8 else "🟢 MEDIUM"
+            
+            # Generate personalized recommendation based on skill, current level, and gap
+            current_lvl = d["current"]
+            gap_size = d["gap"]
+            
+            # Determine skill category
+            tech_skills = ["Python", "JavaScript", "Java", "C++", "SQL", "React", "Node.js", "Docker", "Kubernetes", "AWS", "Azure", "Git"]
+            is_tech = any(tech.lower() in s.lower() for tech in tech_skills)
+            
+            # Build detailed recommendation
+            if current_lvl <= 2:  # Beginner
+                if gap_size > 5:
+                    action = f"Start with beginner-friendly courses on {s}. Complete 3-4 structured tutorials, then build 2 simple projects to apply concepts. Join {s} communities for support."
+                elif gap_size > 3:
+                    action = f"Take a comprehensive {s} course covering fundamentals. Practice daily for 1-2 hours and complete at least one guided project."
+                else:
+                    action = f"Watch intro videos on {s} basics, complete interactive tutorials, and practice with coding challenges or examples."
+            elif current_lvl <= 5:  # Intermediate
+                if gap_size > 4:
+                    action = f"Enroll in advanced {s} courses. Build 2-3 real-world projects and contribute to open-source. Study advanced patterns and best practices."
+                elif gap_size > 2:
+                    action = f"Practice {s} through project-based learning. Build an end-to-end application and review industry best practices."
+                else:
+                    action = f"Deepen {s} knowledge with specialized tutorials. Complete 1 medium-complexity project and optimize for {role} requirements."
+            else:  # Advanced
+                if gap_size > 2:
+                    action = f"Master advanced {s} concepts for {role}. Build production-grade projects, mentor others, and stay updated with latest trends."
+                else:
+                    action = f"Fine-tune {s} expertise with edge cases and optimizations. Review real-world {role} case studies and architectural patterns."
+            
+            gap_rows += f"""
+            <tr>
+                <td><b>{s}</b></td>
+                <td style='text-align:center'>{round(d['current'], 1)}/10</td>
+                <td style='text-align:center'>{round(d['required'], 1)}/10</td>
+                <td style='color:{color};font-weight:700;text-align:center'>{round(d['gap'], 1)}</td>
+                <td style='text-align:center'>{priority_badge}</td>
+                <td style='font-size:0.9rem'>{action}</td>
+            </tr>
+            """
+    
+    if not gap_rows:
+        gap_rows = "<tr><td colspan='6' style='text-align:center;color:#4ecdc4'>🎉 No gaps detected — you meet all requirements!</td></tr>"
+    
+    # Strength details
+    strength_list = ""
+    if strengths:
+        for s, d in strengths.items():
+            surplus_badge = f"+{round(d['surplus'], 1)}" if d['surplus'] > 0 else "At Target"
+            strength_list += f"""
+            <div style='background:#1e2130;border-left:4px solid #4ecdc4;padding:1rem;margin:0.5rem 0;border-radius:6px'>
+                <div style='display:flex;justify-content:space-between;align-items:center'>
+                    <div>
+                        <b style='font-size:1.1rem;color:#4ecdc4'>✅ {s}</b>
+                        <p style='margin:0.3rem 0 0 0;color:#999'>Current Level: {round(d['current'], 1)}/10 | Target: {round(d['required'], 1)}/10</p>
+                    </div>
+                    <span style='background:#4ecdc4;color:#000;padding:0.4rem 1rem;border-radius:20px;font-weight:700'>{surplus_badge}</span>
+                </div>
+            </div>
+            """
+    else:
+        strength_list = "<p style='color:#999;font-style:italic'>No strengths identified yet. Complete the assessment to see your strongest areas.</p>"
+    
+    # Learning path recommendations
+    learning_recommendations = ""
+    gap_skills = [(s, d) for s, d in gaps.items() if d['gap'] > 0]
+    if gap_skills:
+        # Sort by priority
+        sorted_gaps = sorted(gap_skills, key=lambda x: x[1]['priority_score'], reverse=True)[:5]
+        for idx, (skill, details) in enumerate(sorted_gaps, 1):
+            current = details['current']
+            target = details['required']
+            gap = details['gap']
+            
+            # Generate personalized learning path
+            if current <= 2:  # Beginner path
+                phase1 = f"<b>Phase 1 (Weeks 1-2):</b> Complete a beginner {skill} course covering core concepts. Watch 10-15 video tutorials and take notes."
+                phase2 = f"<b>Phase 2 (Weeks 3-4):</b> Follow 3-5 hands-on tutorials to build simple projects. Practice coding daily for at least 1 hour."
+                phase3 = f"<b>Phase 3 (Weeks 5+):</b> Build your first independent {skill} project. Get code reviews from experienced developers."
+            elif current <= 5:  # Intermediate path
+                phase1 = f"<b>Phase 1 (Weeks 1-2):</b> Study advanced {skill} topics relevant to {role}. Review official documentation and architectural patterns."
+                phase2 = f"<b>Phase 2 (Weeks 3-5):</b> Build a production-ready {skill} project with proper testing and CI/CD. Apply industry best practices."
+                phase3 = f"<b>Phase 3 (Weeks 6+):</b> Contribute to open-source {skill} projects. Mentor juniors and write technical articles to solidify knowledge."
+            else:  # Advanced path
+                phase1 = f"<b>Phase 1 (Weeks 1-2):</b> Master cutting-edge {skill} techniques used in {role}. Study system design and scalability patterns."
+                phase2 = f"<b>Phase 2 (Weeks 3-4):</b> Architect and build a complex {skill} solution. Optimize for performance, security, and maintainability."
+                phase3 = f"<b>Phase 3 (Weeks 5+):</b> Lead {skill} initiatives, conduct code reviews, and publish advanced tutorials or speak at conferences."
+            
+            # Resources based on current level
+            if current <= 3:
+                resources = f"Recommended: Udemy/Coursera beginner courses, freeCodeCamp, YouTube tutorials, interactive coding platforms like Codecademy"
+            elif current <= 6:
+                resources = f"Recommended: Pluralsight/LinkedIn Learning, MDN docs, GitHub projects, LeetCode/HackerRank challenges"
+            else:
+                resources = f"Recommended: Advanced courses, tech conferences, research papers, architecture blogs, open-source contributions"
+            
+            learning_recommendations += f"""
+            <div style='background:#1e2130;padding:1.2rem;margin:1rem 0;border-radius:8px;border-left:4px solid #667eea'>
+                <div style='font-size:1.1rem;margin-bottom:0.8rem'>
+                    <b style='color:#90a0f0'>{idx}. {skill}</b> 
+                    <span style='color:#999'>— Go from level {round(current, 1)} to {round(target, 1)} ({round(gap, 1)} level gap)</span>
+                </div>
+                <div style='background:#1a1d2e;padding:1rem;border-radius:6px;margin:0.5rem 0'>
+                    <p style='margin:0.5rem 0;line-height:1.8'>{phase1}</p>
+                    <p style='margin:0.5rem 0;line-height:1.8'>{phase2}</p>
+                    <p style='margin:0.5rem 0;line-height:1.8'>{phase3}</p>
+                </div>
+                <div style='margin-top:0.8rem;padding:0.8rem;background:rgba(102,126,234,0.1);border-radius:6px'>
+                    <p style='margin:0;font-size:0.9rem;color:#b0b8f0'><b>📚 Resources:</b> {resources}</p>
+                </div>
+                <div style='margin-top:0.8rem;display:flex;justify-content:space-between;font-size:0.9rem;color:#999'>
+                    <span>⏱️ Estimated time: {round(gap * 2, 1)}-{round(gap * 4, 1)} weeks</span>
+                    <span>🎯 Priority: {'Critical' if details['priority_score'] > 15 else 'High' if details['priority_score'] > 8 else 'Medium'}</span>
+                </div>
+            </div>
+            """
+    else:
+        learning_recommendations = "<p style='color:#4ecdc4;font-size:1.1rem'>🎉 No gaps to address — maintain and expand your current skillset!</p>"
 
-    strength_list = "".join(f"<li><b>{s}</b> — level {d['current']} (+{d['surplus']} above target)</li>" for s, d in strengths.items()) or "<li>None yet</li>"
+    # Generate personalized next steps based on readiness
+    if readiness < 50:
+        next_steps_content = f"""
+        <li><b>Start with Fundamentals</b> — You have {total_gaps} skills to develop. Begin with the 🔴 critical priorities: {', '.join(critical_gaps[:3]) if critical_gaps else 'focus on basic skills'}.</li>
+        <li><b>Set a Structured Learning Schedule</b> — Dedicate 10-15 hours per week to learning. Create a daily routine with specific time blocks for studying.</li>
+        <li><b>Take Beginner Courses</b> — Enroll in comprehensive courses that cover foundational concepts for your weakest skills.</li>
+        <li><b>Build Simple Projects</b> — Apply what you learn by creating 2-3 beginner-level projects to solidify understanding.</li>
+        <li><b>Join Learning Communities</b> — Connect with others learning the same skills for support, resources, and motivation.</li>
+        <li><b>Track Progress Weekly</b> — Retake the assessment every 2 weeks to see improvements and adjust your learning plan.</li>
+        <li><b>Be Patient and Consistent</b> — Reaching {role} readiness is a marathon, not a sprint. Celebrate small wins along the way!</li>
+"""
+    elif readiness < 70:
+        next_steps_content = f"""
+        <li><b>Prioritize Critical Gaps</b> — Focus on {len(critical_gaps)} critical skills: {', '.join(critical_gaps[:3]) if critical_gaps else 'highest priority areas'}. These will have the biggest impact.</li>
+        <li><b>Take the Adaptive Quiz</b> — Validate your self-assessment with MCQ questions. This helps identify knowledge gaps within each skill.</li>
+        <li><b>Build Real-World Projects</b> — Create 2-3 portfolio projects that demonstrate your {role} skills. Focus on quality over quantity.</li>
+        <li><b>Study Best Practices</b> — Review industry standards, design patterns, and architectural approaches used in {role} positions.</li>
+        <li><b>Contribute to Open Source</b> — Find beginner-friendly issues on GitHub projects related to your target skills.</li>
+        <li><b>Network with Professionals</b> — Connect with {role} professionals on LinkedIn. Ask for informational interviews to learn more.</li>
+        <li><b>Update Your Resume</b> — Highlight your {len(strengths)} strength areas prominently. Include links to your projects and GitHub.</li>
+"""
+    elif readiness < 90:
+        next_steps_content = f"""
+        <li><b>Fine-Tune Remaining Gaps</b> — You're close! Focus on closing the {total_gaps} remaining gaps to reach full readiness for {role}.</li>
+        <li><b>Deepen Expertise</b> — Go beyond basics in your weaker areas. Study advanced topics, edge cases, and optimization techniques.</li>
+        <li><b>Build Production-Ready Projects</b> — Create complex projects with proper testing, CI/CD, monitoring, and documentation.</li>
+        <li><b>Validate with Quizzes</b> — Take the adaptive quiz to confirm your skill levels objectively. Aim for high scores on critical skills.</li>
+        <li><b>Practice System Design</b> — For {role} roles, practice designing scalable systems and explaining your architectural decisions.</li>
+        <li><b>Prepare Interview Stories</b> — Document your {len(strengths)} strengths with specific examples using the STAR method (Situation, Task, Action, Result).</li>
+        <li><b>Start Applying</b> — Your {readiness}% readiness is strong. Begin applying to {role} positions while continuing to improve.</li>
+"""
+    else:
+        next_steps_content = f"""
+        <li><b>You're Job-Ready!</b> — With {readiness}% readiness and {len(strengths)} skills at/above target, you're well-qualified for {role} positions.</li>
+        <li><b>Polish Your Applications</b> — Tailor your resume and cover letter to highlight your strengths and relevant project experience.</li>
+        <li><b>Prepare for Interviews</b> — Practice technical interviews, system design, and behavioral questions specific to {role}.</li>
+        <li><b>Showcase Your Work</b> — Build a portfolio website or GitHub profile showcasing your best projects with clear README files.</li>
+        <li><b>Network Actively</b> — Attend industry events, join {role} communities, and leverage your network for job referrals.</li>
+        <li><b>Continue Learning</b> — Stay current with industry trends. Set aside time weekly to learn emerging technologies.</li>
+        <li><b>Consider Leadership</b> — Mentor others, write technical blogs, or speak at meetups to establish yourself as an expert.</li>
+"""
+
+    # Generate chart images for the report
+    radar_chart_img = ""
+    gap_chart_img = ""
+    try:
+        import warnings
+        warnings.filterwarnings('ignore', category=DeprecationWarning)
+        
+        # Create radar chart
+        radar_fig = create_radar_chart(user_scores, reqs)
+        radar_bytes = radar_fig.to_image(format="png", width=800, height=600)
+        radar_b64 = base64.b64encode(radar_bytes).decode()
+        radar_chart_img = f'<img src="data:image/png;base64,{radar_b64}" style="width:100%;max-width:800px;border-radius:8px;margin:1rem 0" alt="Radar Chart">'
+        
+        # Create gap bar chart
+        gap_fig = create_gap_bar_chart(gaps)
+        gap_bytes = gap_fig.to_image(format="png", width=800, height=600)
+        gap_b64 = base64.b64encode(gap_bytes).decode()
+        gap_chart_img = f'<img src="data:image/png;base64,{gap_b64}" style="width:100%;max-width:800px;border-radius:8px;margin:1rem 0" alt="Gap Bar Chart">'
+    except Exception as e:
+        # If chart export fails, show a note
+        st.info(f"📊 Chart generation: {str(e)[:100]}")
+        radar_chart_img = '<div style="background:#1a1d2e;padding:2rem;border-radius:8px;text-align:center;color:#999;font-style:italic;margin:1rem 0"><p>📊 Radar Chart - View in Gap Analysis page</p></div>'
+        gap_chart_img = '<div style="background:#1a1d2e;padding:2rem;border-radius:8px;text-align:center;color:#999;font-style:italic;margin:1rem 0"><p>📊 Gap Bar Chart - View in Gap Analysis page</p></div>'
 
     html_report = f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8">
 <style>
-body{{font-family:'Inter',Helvetica,Arial,sans-serif;color:#e8e8e8;background:#0e1117;max-width:800px;margin:auto;padding:2rem}}
-h1{{background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;padding:1.2rem 1.6rem;border-radius:12px}}
-h2{{color:#90a0f0;border-bottom:2px solid #667eea;padding-bottom:4px}}
-p,li,td{{color:#d0d0d0}}
+body{{font-family:'Inter',Helvetica,Arial,sans-serif;color:#e8e8e8;background:#0e1117;max-width:1000px;margin:auto;padding:2rem}}
+h1{{background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;padding:1.5rem 2rem;border-radius:12px;box-shadow:0 8px 32px rgba(102,126,234,0.5);text-align:center}}
+h2{{color:#90a0f0;border-bottom:3px solid #667eea;padding-bottom:10px;margin-top:3rem}}
+h3{{color:#b0b8f0;margin-top:1.5rem;margin-bottom:0.8rem}}
+p,li,td{{color:#d0d0d0;line-height:1.7}}
 b{{color:#f0f0f0}}
-table{{width:100%;border-collapse:collapse;margin:1rem 0}}
-th,td{{text-align:left;padding:8px 12px;border-bottom:1px solid #333}}
-th{{background:#667eea;color:#fff}}
-.metric{{display:inline-block;background:#1e2130;border:1px solid rgba(102,126,234,0.3);border-radius:10px;padding:1rem 2rem;margin:0.5rem;text-align:center}}
-.metric b{{font-size:1.8rem;color:#90a0f0}}
+table{{width:100%;border-collapse:collapse;margin:1.5rem 0;font-size:0.95rem;box-shadow:0 4px 12px rgba(0,0,0,0.3)}}
+th,td{{text-align:left;padding:14px;border-bottom:1px solid #2a2d3a}}
+th{{background:#667eea;color:#fff;font-weight:600;text-transform:uppercase;font-size:0.85rem;letter-spacing:0.5px}}
+tr:nth-child(even){{background:#16181f}}
+tr:hover{{background:#1e2130}}
+.metric{{display:inline-block;background:linear-gradient(135deg,#1e2130,#2a2d3a);border:2px solid rgba(102,126,234,0.5);border-radius:12px;padding:1.5rem 2rem;margin:0.5rem;text-align:center;min-width:140px;box-shadow:0 4px 12px rgba(0,0,0,0.3)}}
+.metric b{{font-size:2.5rem;color:#90a0f0;display:block;margin-bottom:0.5rem;font-weight:700}}
+.metric span{{font-size:0.9rem;color:#999;text-transform:uppercase;letter-spacing:1px}}
+.summary-box{{background:linear-gradient(135deg,#1e2130,#262a3d);border-radius:12px;padding:2rem;margin:2rem 0;border-left:5px solid #90a0f0;box-shadow:0 4px 20px rgba(0,0,0,0.3)}}
+.info-box{{background:#1a1d2e;border-radius:10px;padding:1.2rem;margin:1.5rem 0;border:1px solid #2a2d3a;box-shadow:0 2px 8px rgba(0,0,0,0.2)}}
+img{{display:block;margin:1rem auto;box-shadow:0 4px 20px rgba(0,0,0,0.5);border-radius:8px}}
+.info-box{{background:#1a1d2e;border-radius:8px;padding:1rem;margin:1rem 0;border:1px solid #333}}
 </style></head><body>
-<h1>🚀 {APP_NAME} — Skill Gap Report</h1>
-<p><b>Name:</b> {name} &nbsp;|&nbsp; <b>Target Role:</b> {role} &nbsp;|&nbsp; <b>Date:</b> {today}</p>
+<h1>🚀 {APP_NAME} — Comprehensive Skill Gap Report</h1>
+<p style='font-size:1.05rem'><b>Name:</b> {name} &nbsp;|&nbsp; <b>Target Role:</b> {role} &nbsp;|&nbsp; <b>Report Date:</b> {today}</p>
 
-<div>
-<span class="metric"><b>{readiness}%</b><br>Role Readiness</span>
-<span class="metric"><b>{len(strengths)}</b><br>At Target</span>
-<span class="metric"><b>{len([g for g in gaps.values() if g['gap']>0])}</b><br>Gaps</span>
+<h2>📊 Executive Summary</h2>
+<div class="summary-box">
+    <div style='display:flex;justify-content:space-around;flex-wrap:wrap;margin-bottom:1rem'>
+        <div class="metric">
+            <b style='color:{readiness_color}'>{readiness}%</b>
+            <span>Role Readiness</span>
+        </div>
+        <div class="metric">
+            <b>{len(gaps)}</b>
+            <span>Total Skills</span>
+        </div>
+        <div class="metric">
+            <b style='color:#4ecdc4'>{len(strengths)}</b>
+            <span>At/Above Target</span>
+        </div>
+        <div class="metric">
+            <b style='color:#ff6b6b'>{total_gaps}</b>
+            <span>Skills to Develop</span>
+        </div>
+    </div>
+    <div class="info-box">
+        <p style='margin:0;font-size:1.05rem'><b>Assessment:</b> {readiness_msg}</p>
+        <p style='margin:0.5rem 0 0 0;color:#999'>Average skill gap: {avg_gap} levels | Critical priorities: {len(critical_gaps)} skills</p>
+    </div>
 </div>
 
-<h2>Skill Gap Details</h2>
-<table><tr><th>Skill</th><th>Current</th><th>Required</th><th>Gap</th><th>Priority</th></tr>
-{gap_rows}</table>
+<h2>� Visual Analysis</h2>
+<div style='display:flex;flex-wrap:wrap;gap:2rem;justify-content:space-around;margin:2rem 0'>
+    <div style='flex:1;min-width:300px'>
+        <h3 style='text-align:center;color:#90a0f0'>🕸️ Radar Chart: Your Skills vs Required</h3>
+        {radar_chart_img}
+    </div>
+    <div style='flex:1;min-width:300px'>
+        <h3 style='text-align:center;color:#90a0f0'>📊 Gap Analysis Bar Chart</h3>
+        {gap_chart_img}
+    </div>
+</div>
 
-<h2>Strength Areas</h2>
-<ul>{strength_list}</ul>
+<h2>�🔍 Detailed Skill Gap Analysis</h2>
+<p style='color:#999;margin-bottom:1rem'>This table shows all required skills for the <b>{role}</b> role, your current level, and recommended actions to close each gap.</p>
+<table>
+    <tr>
+        <th>Skill Name</th>
+        <th style='text-align:center'>Your Level</th>
+        <th style='text-align:center'>Required</th>
+        <th style='text-align:center'>Gap</th>
+        <th style='text-align:center'>Priority</th>
+        <th>Recommended Action</th>
+    </tr>
+    {gap_rows}
+</table>
 
-<h2>Next Steps</h2>
-<ol>
-<li>Focus on the highest-priority gaps listed above.</li>
-<li>Take the adaptive quiz to validate your levels.</li>
-<li>Follow the personalized learning roadmap in the app.</li>
-</ol>
-<p style="color:#777;margin-top:2rem;font-size:0.85rem">Generated by {APP_NAME} • {today}</p>
+<div class="info-box">
+    <p style='margin:0;font-size:0.9rem'><b>Understanding Priority Levels:</b></p>
+    <ul style='margin:0.5rem 0;padding-left:1.5rem;font-size:0.9rem'>
+        <li><b>🔴 CRITICAL:</b> Essential skill with large gap — focus on this immediately</li>
+        <li><b>🟡 HIGH:</b> Important skill that impacts job performance significantly</li>
+        <li><b>🟢 MEDIUM:</b> Useful skill that can be developed after higher priorities</li>
+    </ul>
+</div>
+
+<h2>💪 Your Strength Areas</h2>
+<p style='color:#999;margin-bottom:1rem'>These are skills where you meet or exceed the required level. Leverage these strengths in your job applications and interviews!</p>
+{strength_list}
+
+<h2>🗺️ Personalized Learning Path</h2>
+<p style='color:#999;margin-bottom:1rem'>Focus on these top priority skills in order. Each skill includes specific recommendations and estimated learning timeframes.</p>
+{learning_recommendations}
+
+<h2>✅ Actionable Next Steps for {name}</h2>
+<p style='color:#999;margin-bottom:1rem'>Personalized action plan based on your {readiness}% readiness for the {role} role:</p>
+<div style='background:#1e2130;padding:1.5rem;border-radius:10px;margin:1rem 0'>
+    <ol style='padding-left:1.5rem;line-height:2.2'>
+{next_steps_content}
+    </ol>
+</div>
+
+<h2>📚 Recommended Resources</h2>
+<div class="info-box">
+    <ul style='padding-left:1.5rem'>
+        <li><b>Online Learning:</b> Coursera, Udemy, Pluralsight, LinkedIn Learning</li>
+        <li><b>Practice Platforms:</b> LeetCode, HackerRank, CodeWars, Exercism</li>
+        <li><b>Documentation:</b> Official docs for your target technologies and frameworks</li>
+        <li><b>Community:</b> GitHub, Stack Overflow, Reddit communities for your field</li>
+        <li><b>Mentorship:</b> Connect with professionals in your target role via LinkedIn or local meetups</li>
+    </ul>
+</div>
+
+<div style='margin-top:3rem;padding-top:1.5rem;border-top:1px solid #333;text-align:center'>
+    <p style='color:#777;font-size:0.85rem'>Generated by <b>{APP_NAME}</b> • {today}</p>
+    <p style='color:#666;font-size:0.8rem'>This report is based on your self-assessment and the requirements for {role}.<br>
+    Validate your skills through quizzes and real-world projects for the most accurate career planning.</p>
+</div>
 </body></html>"""
 
-    st.subheader("Preview")
+    st.subheader("📋 Report Overview")
+    
+    # Summary cards before preview
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("📊 Readiness Score", f"{readiness}%", 
+                delta="Ready" if readiness >= 80 else "In Progress",
+                delta_color="normal" if readiness >= 80 else "off")
+    col2.metric("✅ Strengths", len(strengths))
+    col3.metric("🎯 Skills to Develop", total_gaps)
+    col4.metric("🔴 Critical Gaps", len(critical_gaps))
+    
+    st.info(f"💡 **Assessment:** {readiness_msg}")
+    
+    # Show top 3 priorities
+    if critical_gaps:
+        with st.expander("🔍 Top Priority Skills to Focus On", expanded=True):
+            for idx, skill in enumerate(critical_gaps[:3], 1):
+                gap_info = gaps[skill]
+                st.write(f"**{idx}. {skill}** — Gap: {round(gap_info['gap'], 1)} levels | Priority Score: {round(gap_info['priority_score'], 1)}")
+    
+    st.markdown("---")
+    st.subheader("📄 Full Report Preview")
+    st.caption("Scroll through the preview below or download as PDF/HTML for offline viewing")
     st.components.v1.html(html_report, height=700, scrolling=True)
 
-    st.download_button(
-        label="⬇️ Download HTML Report",
-        data=html_report,
-        file_name=f"skillforge_report_{role.replace(' ', '_').lower()}.html",
-        mime="text/html",
-    )
+    st.markdown("---")
+    st.subheader("⬇️ Download Your Report")
+    st.write("Save this comprehensive report to share with mentors, track your progress, or use in job applications.")
+    
+    col_dl1, col_dl2, col_dl3 = st.columns([2, 2, 1])
+    
+    # Generate PDF if xhtml2pdf is available
+    pdf_data = None
+    if PDF_AVAILABLE:
+        try:
+            pdf_buffer = BytesIO()
+            pisa_status = pisa.CreatePDF(html_report, dest=pdf_buffer)
+            if not pisa_status.err:
+                pdf_data = pdf_buffer.getvalue()
+            pdf_buffer.close()
+        except Exception as e:
+            st.warning(f"PDF generation failed: {str(e)[:50]}...")
+    
+    # Download buttons
+    with col_dl1:
+        if pdf_data:
+            st.download_button(
+                label="📥 Download PDF Report",
+                data=pdf_data,
+                file_name=f"skillforge_report_{role.replace(' ', '_').lower()}_{datetime.date.today().strftime('%Y%m%d')}.pdf",
+                mime="application/pdf",
+                help="Downloads a professional PDF report",
+                use_container_width=True
+            )
+        else:
+            st.info("⚠️ PDF generation unavailable")
+    
+    with col_dl2:
+        st.download_button(
+            label="📄 Download HTML Report",
+            data=html_report,
+            file_name=f"skillforge_report_{role.replace(' ', '_').lower()}_{datetime.date.today().strftime('%Y%m%d')}.html",
+            mime="text/html",
+            help="Downloads an HTML file you can open in any browser",
+            use_container_width=True
+        )
+    
+    with col_dl3:
+        if pdf_data:
+            st.success(f"PDF: {len(pdf_data) // 1024}KB")
+        else:
+            st.info(f"HTML: {len(html_report) // 1024}KB")
+    
+    # Help note for PDF conversion
+    if not pdf_data:
+        st.caption("💡 **Tip:** Download the HTML file, open it in your browser, and use 'Print to PDF' (Ctrl+P → Save as PDF)")
+
+
 
 # ──────────────────────────────────────────────
 #  Footer

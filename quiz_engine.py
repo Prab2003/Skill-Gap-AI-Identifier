@@ -474,7 +474,11 @@ def generate_adaptive_quiz(
             difficulty = _next_difficulty(difficulty, True)
             qid += 1
 
-    random.shuffle(quiz)
+    # Don't shuffle - keep questions in order for better UX
+    # Assign display order
+    for idx, q in enumerate(quiz):
+        q["display_order"] = idx
+    
     return quiz
 
 
