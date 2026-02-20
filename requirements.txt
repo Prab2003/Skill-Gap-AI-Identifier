@@ -8,6 +8,5 @@ huggingface-hub
 requests
 tenacity
 PyYAML
-SpeechRecognition
 xhtml2pdf
 kaleido

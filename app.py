@@ -20,7 +20,15 @@ from quiz_engine import generate_adaptive_quiz, score_quiz
 from ml_models import skill_predictor, personalizer
 from ai_engine import AIEngine
 from resume_parser import extract_skills_from_text
-from voice_assistant import VoiceAssistant
+
+# Try importing VoiceAssistant (may not work on servers without audio)
+try:
+    from voice_assistant import VoiceAssistant
+    VOICE_AVAILABLE = True
+except (ImportError, OSError):
+    VOICE_AVAILABLE = False
+    VoiceAssistant = None
+    
 from auth_ui import require_auth, render_logout_button
 
 # Try importing xhtml2pdf for PDF generation (works on Windows without external dependencies)
@@ -90,7 +98,7 @@ for k, v in _defaults.items():
         st.session_state[k] = v
 
 # Lazy-init heavy objects
-if st.session_state.voice_assistant is None:
+if st.session_state.voice_assistant is None and VOICE_AVAILABLE:
     st.session_state.voice_assistant = VoiceAssistant()
 
 # ──────────────────────────────────────────────
@@ -609,10 +617,18 @@ elif page == "🧠 AI Insights":
     st.markdown("---")
     st.subheader("📝 Knowledge Test & Voice Coaching")
     st.caption("Take adaptive tests with instant feedback, or get voice coaching help.")
+    
+    # Filter modes based on voice availability
+    available_modes = ["Test Mode"]
+    if VOICE_AVAILABLE and st.session_state.voice_assistant is not None:
+        available_modes.append("Help Mode")
+    else:
+        if "Help Mode" in available_modes:
+            available_modes.remove("Help Mode")
 
     mode = st.radio(
         "Select Mode",
-        ["Test Mode", "Help Mode"],
+        available_modes,
         horizontal=True,
         key="voice_mode_selector",
     )
