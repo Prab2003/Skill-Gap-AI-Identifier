@@ -3,7 +3,6 @@ plotly
 scikit-learn
 numpy
 pandas
-httpx
 huggingface-hub
 requests
 tenacity

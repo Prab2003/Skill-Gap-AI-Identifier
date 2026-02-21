@@ -4,7 +4,7 @@ An AI-powered career skill gap analyzer that helps users identify their strength
 
 ## Features
 
-- **Authentication System**: Secure login/signup with Supabase
+- **Authentication System**: Local session-based access
 - **Self-Assessment**: Evaluate your skills across multiple competencies
 - **Adaptive Quiz**: Smart questioning system that adapts to your knowledge level
 - **Gap Analysis**: Visual representation of skill gaps vs. target role requirements
@@ -18,7 +18,7 @@ An AI-powered career skill gap analyzer that helps users identify their strength
 
 - **Frontend**: Streamlit
 - **Backend**: Python 3.x
-- **Database**: Supabase PostgreSQL
+- **Storage**: In-session local state
 - **AI/ML**: HuggingFace API, scikit-learn
 - **Charts**: Plotly, Kaleido
 
@@ -42,12 +42,7 @@ source .venv/bin/activate  # On Linux/Mac
 pip install -r requirements.txt
 ```
 
-4. Set up Supabase:
-   - Create a Supabase project
-   - Run the SQL scripts in `supabase_setup.sql` and `auth_setup.sql`
-   - Update `.streamlit/secrets.toml` with your credentials
-
-5. Run the application:
+4. Run the application:
 ```bash
 streamlit run app.py
 ```
@@ -56,17 +51,13 @@ streamlit run app.py
 
 Create `.streamlit/secrets.toml`:
 ```toml
-[supabase]
-url = "your-supabase-url"
-key = "your-supabase-key"
-
 [huggingface]
 api_key = "your-hf-api-key"  # Optional
 ```
 
 ## Usage
 
-1. **Sign up** or **Log in** to your account
+1. Click **Continue** on the access screen
 2. Select your **target role** on the Dashboard
 3. Complete the **Self-Assessment** to rate your current skills
 4. Take the **Adaptive Quiz** for objective skill evaluation

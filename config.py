@@ -1,6 +1,6 @@
 # config.py - Application configuration and constants
 
-APP_NAME = "SkillForge AI"
+APP_NAME = "SkillForge"
 APP_ICON = "🚀"
 APP_TAGLINE = "AI-Powered Skill Gap Identifier & Career Accelerator"
 

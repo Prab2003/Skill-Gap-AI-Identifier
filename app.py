@@ -59,13 +59,6 @@ require_auth()
 #  Session state initialisation
 # ──────────────────────────────────────────────
 
-# Load HuggingFace API key from secrets if available
-_hf_key_from_secrets = ""
-try:
-    _hf_key_from_secrets = st.secrets.get("huggingface", {}).get("api_key", "")
-except Exception:
-    pass
-
 _defaults = {
     "user_scores": {},
     "quiz_mode": False,
@@ -73,7 +66,7 @@ _defaults = {
     "quiz": [],
     "voice_assistant": None,
     "ai_engine": None,
-    "hf_key": _hf_key_from_secrets,
+    "hf_key": "",
     "profile_name": "",
     "chat_history": [],
     "selected_role": None,
@@ -111,14 +104,14 @@ with st.sidebar:
     st.markdown("---")
 
     # HuggingFace API key (optional)
-    if _hf_key_from_secrets:
-        st.success("✓ HuggingFace API Key loaded")
-        hf_key = _hf_key_from_secrets
-    else:
-        hf_key = st.text_input("🔑 HuggingFace API Key (optional)",
-                               value=st.session_state.hf_key,
-                               help="Enables AI Chat Advisor and resume AI extraction")
-        hf_key = hf_key.strip()
+    hf_key = st.text_input(
+        "🔑 HuggingFace API Key (optional)",
+        value=st.session_state.hf_key,
+        type="password",
+        help="Enables AI Chat Advisor and resume AI extraction",
+        placeholder="Paste your HuggingFace token (hf_...)"
+    )
+    hf_key = hf_key.strip()
     
     if hf_key != st.session_state.hf_key:
         st.session_state.hf_key = hf_key
@@ -137,13 +130,13 @@ with st.sidebar:
 
     st.markdown("---")
     page = st.radio("Navigate", [
-        "🏠 Dashboard",
-        "📋 Self-Assessment",
-        "❓ Adaptive Quiz",
-        "📊 Gap Analysis",
-        "🗺️ Learning Roadmap",
-        "🧠 AI Insights",
-        "📄 Export Report",
+        "Dashboard",
+        "Self-Assessment",
+        "Adaptive Quiz",
+        "Gap Analysis",
+        "Learning Roadmap",
+        "AI Insights",
+        "Export Report",
     ])
     
     # Logout button
@@ -187,7 +180,7 @@ def _extract_interview_score(feedback: str) -> float:
 # ============================================================
 #  PAGE: DASHBOARD
 # ============================================================
-if page == "🏠 Dashboard":
+if page == "Dashboard":
     render_header(APP_NAME, APP_TAGLINE)
 
     col_a, col_b = st.columns([2, 1])
@@ -265,7 +258,7 @@ if page == "🏠 Dashboard":
 # ============================================================
 #  PAGE: SELF-ASSESSMENT
 # ============================================================
-elif page == "📋 Self-Assessment":
+elif page == "Self-Assessment":
     render_header("Self-Assessment", "Rate your current proficiency for each skill (1 = no experience, 10 = expert)")
 
     if _need_role():
@@ -295,7 +288,7 @@ elif page == "📋 Self-Assessment":
 # ============================================================
 #  PAGE: ADAPTIVE QUIZ
 # ============================================================
-elif page == "❓ Adaptive Quiz":
+elif page == "Adaptive Quiz":
     render_header("Adaptive Quiz", "Real multiple-choice questions that adapt to your level")
 
     if _need_role():
@@ -393,7 +386,7 @@ elif page == "❓ Adaptive Quiz":
 # ============================================================
 #  PAGE: GAP ANALYSIS
 # ============================================================
-elif page == "📊 Gap Analysis":
+elif page == "Gap Analysis":
     render_header("Gap Analysis", "Visual comparison of your skills vs role requirements")
 
     if _need_role():
@@ -467,7 +460,7 @@ elif page == "📊 Gap Analysis":
 # ============================================================
 #  PAGE: LEARNING ROADMAP
 # ============================================================
-elif page == "🗺️ Learning Roadmap":
+elif page == "Learning Roadmap":
     render_header("Learning Roadmap", "AI-generated weekly plan tailored to your gaps")
 
     if _need_role():
@@ -558,7 +551,7 @@ elif page == "🗺️ Learning Roadmap":
 # ============================================================
 #  PAGE: AI INSIGHTS
 # ============================================================
-elif page == "🧠 AI Insights":
+elif page == "AI Insights":
     render_header("AI Insights", "ML predictions + AI career advisor chat")
 
     if _need_role():
@@ -994,7 +987,7 @@ elif page == "🧠 AI Insights":
 # ============================================================
 #  PAGE: EXPORT REPORT
 # ============================================================
-elif page == "📄 Export Report":
+elif page == "Export Report":
     render_header("Export Report", "Download a professional skill-gap report")
 
     if _need_role():
